@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D 像素風跑酷遊戲 (最終版)</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #000;
+        }
+
+        canvas {
+            border: 2px solid #555;
+            background-color: #3498db;
+        }
+
+        #startScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 1000;
+        }
+
+        #startButton {
+            padding: 15px 30px;
+            font-size: 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+
+        #startButton:hover {
+            background-color: #45a049;
+        }
+
+        #weatherStatus {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 18px;
+            font-family: Arial, sans-serif;
+            z-index: 100;
+            display: none;  /* 初始隱藏 */
+            transition: opacity 0.3s ease;
+        }
+    </style>
+    <script>
+    </script>
+</head>
+<body>
+    <div id="startScreen">
+        <h1>2D 像素風跑酷遊戲</h1>
+        <p>點擊下方按鈕開始遊戲</p>
+        <button id="startButton">開始遊戲</button>
+    </div>
+
+    <div id="weatherStatus"></div>
+    <canvas id="gameCanvas"></canvas>
+    <audio id="bgm" loop>
+        <source src="bgm.mp3" type="audio/mpeg">
+    </audio>
+    <script>
+        // --- 1. 遊戲設定與初始化 ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const bgm = document.getElementById('bgm');
+        const startScreen = document.getElementById('startScreen');
+        const startButton = document.getElementById('startButton');
+
+        canvas.width = 1920;
+        canvas.height = 1080;
+        ctx.imageSmoothingEnabled = false;
+        // 開始按鈕點擊事件
+        startButton.addEventListener('click', async function() {
+            startScreen.style.display = 'none';
+            // 開始播放音樂
+            try {
+                await bgm.play();
+            } catch (error) {
+                console.log("音樂播放被阻止:", error);
+            }
+            // 開始遊戲
+            lastTime = performance.now();
+            requestAnimationFrame(animate);
+        });
+
+        // 更新天氣狀態顯示
+        function updateWeatherStatus(message) {
+            const weatherStatus = document.getElementById('weatherStatus');
+            weatherStatus.textContent = message;
+            weatherStatus.style.display = 'block';
+            
+            // 5秒後淡出
+            setTimeout(() => {
+                weatherStatus.style.opacity = '0';
+                setTimeout(() => {
+                    weatherStatus.style.display = 'none';
+                    weatherStatus.style.opacity = '1';
+                }, 300);
+            }, 5000);
+        }
+
+        // --- 2. 遊戲常數與變數 ---
+        // 物理常數 (單位: 像素/秒)
+        const JUMP_VELOCITY_A = -1000;    // 小跳速度（調整為適應新高度）
+        const JUMP_VELOCITY_B = -1500;    // 大跳速度（調整為適應新高度）
+        const NORMAL_GRAVITY = 3000;      // 上升時的重力（調整為適應新高度）
+        const FALLING_GRAVITY = 4500;     // 下落時的重力（調整為適應新高度）
+
+        const SAFE_START_FRAMES = 300; // 5秒安全時間 (5s * 60fps)
+
+        // 背景顏色相關
+        const DAY_COLOR = '#3498db';    // 白天顏色
+        const NIGHT_COLOR = '#1a1a2e';  // 夜晚顏色
+        const COLD_DAY_COLOR = '#9bb3bf'; // 冷天顏色
+        let currentBgColor = DAY_COLOR;
+        let targetBgColor = DAY_COLOR;
+        let colorTransitionProgress = 0;
+        const COLOR_TRANSITION_SPEED = 0.002; // 5秒漸變（1/500 秒）
+
+        // 環境數值相關
+        let humidity = 50;  // 固定濕度為 50%
+        let temperature = 20; // 固定溫度為 20°C
+        let nextWeatherChange = 150;
+        let nextDayNightChange = 100;
+
+        // 遊戲狀態變數
+        let gameSpeed;
+        let nextSpeedUpScore;
+        let score;
+        let isGameOver;
+        let gameFrame;
+        let isPaused = false;  // 新增暫停狀態變數
+        let weatherMessage = '';  // 新增天氣訊息變數
+        let weatherMessageTimer = 0;  // 新增天氣訊息顯示計時器
+
+        // 【修改】跳躍相關變數
+        let keyPressed = {};
+        let isHoldingJump = false;         // 空白鍵是否被按住
+        let jumpPressStart = null;         // 按下空白鍵的起始時間
+        let mediumJumpTimeout = null;      // 用於觸發中等跳躍的計時器
+        let mediumJumpTriggered = false;   // 中等跳躍是否已被觸發
+        let lastRepeatJumpTime = 0;        // 上次連續長按跳躍的時間
+
+        const JUMP_PRESS_THRESHOLD = 125;  // 短按和中按的界線 (125ms)
+        const JUMP_REPEAT_TIME = 250;      // 長按連續跳躍的間隔 (250ms)
+
+        // Delta Time 相關變數
+        let lastTime = 0;
+        let deltaTime = 0;
+
+        const GROUND_Y = canvas.height - 400;
+
+        // --- 3. 玩家 (機器人) ---
+        class Player {
+            constructor() {
+                this.x = 300;
+                this.y = GROUND_Y - 150;
+                this.width = 75;
+                this.height = 150;
+                this.normalHeight = 150;
+                this.crouchHeight = 90;   // 蹲下高度改為 90
+                this.velocityY = 0;
+                this.isJumping = true;
+                this.isCrouching = false;
+                this.prevY = this.y;
+                
+                // 跑步動畫相關
+                this.runningImages = [];
+                this.currentFrame = 0;
+                this.frameCount = 6;
+                this.frameDelay = 6;
+                this.frameCounter = 0;
+                
+                // 載入跑步圖片
+                for (let i = 1; i <= this.frameCount; i++) {
+                    const img = new Image();
+                    img.src = `running/running${i}.png`;
+                    this.runningImages.push(img);
+                }
+            }
+
+            draw() {
+                if (this.isJumping) {
+                    // 跳躍時使用第一張圖片
+                    ctx.drawImage(this.runningImages[0], this.x, this.y, this.width, this.height);
+                } else {
+                    // 跑步動畫（包括蹲下時）
+                    this.frameCounter++;
+                    if (this.frameCounter >= this.frameDelay) {
+                        this.frameCounter = 0;
+                        this.currentFrame = (this.currentFrame + 1) % this.frameCount;
+                    }
+                    
+                    if (this.isCrouching) {
+                        // 蹲下時保持動畫但縮小高度
+                        ctx.drawImage(this.runningImages[this.currentFrame], this.x, this.y, this.width, this.crouchHeight);
+                    } else {
+                        // 正常跑步
+                        ctx.drawImage(this.runningImages[this.currentFrame], this.x, this.y, this.width, this.height);
+                    }
+                }
+            }
+
+            update(platforms, deltaTime) {
+                this.prevY = this.y;
+                this.y += this.velocityY * deltaTime;
+
+                // 先檢查是否站在平台上
+                let onGround = false;
+                for (const platform of platforms) {
+                    // 檢查是否站在平台上
+                    const margin = 2;
+                    if (this.x < platform.x + platform.width &&
+                        this.x + this.width > platform.x &&
+                        this.y + this.height >= platform.y - margin &&
+                        this.y + this.height <= platform.y + margin) {
+                        onGround = true;
+                        this.isJumping = false;
+                        this.velocityY = 0;
+                        break;
+                    }
+                }
+
+                // 如果沒有站在平台上，檢查是否從上方落下
+                if (!onGround) {
+                    for (const platform of platforms) {
+                        if (this.x < platform.x + platform.width &&
+                            this.x + this.width > platform.x &&
+                            this.velocityY >= 0 &&  // 正在下落
+                            this.prevY + this.height <= platform.y &&  // 上一幀在平台上方
+                            this.y + this.height >= platform.y) {  // 當前幀碰到平台
+                            this.y = platform.y - this.height;
+                            this.velocityY = 0;
+                            this.isJumping = false;
+                            onGround = true;
+                            break;
+                        }
+                    }
+                }
+
+                // 如果沒有站在任何平台上，應用重力
+                if (!onGround) {
+                    this.isJumping = true;
+                    if (this.velocityY < 0) {
+                        this.velocityY += NORMAL_GRAVITY * deltaTime;
+                    } else {
+                        this.velocityY += FALLING_GRAVITY * deltaTime;
+                    }
+                }
+
+                if (this.y > canvas.height) {
+                    gameOver();
+                }
+            }
+
+            jump(strength = JUMP_VELOCITY_A) {
+                if (!this.isJumping) {
+                    this.velocityY = strength;
+                    this.isJumping = true;
+                }
+            }
+
+            crouch() {
+                if (!this.isJumping && !this.isCrouching) {
+                    this.isCrouching = true;
+                    this.y += this.normalHeight - this.crouchHeight;
+                    this.height = this.crouchHeight;
+                    this.width = 45;  // 蹲下時寬度改為 45
+                }
+            }
+
+            standUp() {
+                if (this.isCrouching) {
+                    this.isCrouching = false;
+                    this.y -= this.normalHeight - this.crouchHeight;
+                    this.height = this.normalHeight;
+                    this.width = 75;  // 站起時恢復為 75
+                }
+            }
+        }
+
+        // --- 4. 平台 (樓頂) ---
+        class Platform {
+            constructor(x, width) {
+                this.x = x;
+                this.y = GROUND_Y;
+                this.width = width;
+                this.height = 400;
+                // 根據分數選擇建築圖片
+                if (score < 50) {
+                    // 50分前只使用 building9-12
+                    const buildingTypes = ['building9', 'building10', 'building11', 'building12'];
+                    this.buildingType = buildingTypes[Math.floor(Math.random() * buildingTypes.length)];
+                } else {
+                    // 50分後使用所有圖片
+                    const buildingTypes = ['building1', 'building2', 'building3', 'building4', 'building5', 'building6', 'building7', 'building8', 'building9', 'building10', 'building11', 'building12'];
+                    this.buildingType = buildingTypes[Math.floor(Math.random() * buildingTypes.length)];
+                }
+                this.image = new Image();
+                this.image.src = `images/${this.buildingType}.png`;
+                // 如果圖片載入失敗，使用預設顏色
+                this.image.onerror = () => {
+                    this.useDefaultColor = true;
+                    this.color = `rgb(${Math.random() * 50 + 50}, ${Math.random() * 50 + 50}, ${Math.random() * 50 + 50})`;
+                };
+                // 等待圖片載入完成後獲取原始寬度
+                this.image.onload = () => {
+                    this.originalWidth = this.image.width;
+                    this.originalHeight = this.image.height;
+                };
+            }
+            update(deltaTime) {
+                this.x -= gameSpeed * deltaTime;
+            }
+            draw() {
+                if (this.useDefaultColor) {
+                    ctx.fillStyle = this.color;
+                    ctx.fillRect(this.x, this.y, this.width, this.height);
+                } else {
+                if (!this.originalWidth) {
+                    ctx.fillStyle = '#808080';
+                    ctx.fillRect(this.x, this.y, this.width, this.height);
+                return;
+                }
+
+            const scale = this.height / this.originalHeight;
+            const scaledWidth = this.originalWidth * scale;
+            const repeatCount = Math.ceil(this.width / scaledWidth);
+
+            for (let i = 0; i <= repeatCount; i++) {
+                let drawX = this.x + i * scaledWidth;
+                let remaining = this.x + this.width - drawX;
+                let drawWidth = Math.min(scaledWidth, remaining);
+
+            if (drawWidth > 0) {
+                ctx.drawImage(
+                    this.image,
+                    drawX,
+                    this.y,
+                    drawWidth,
+                    this.height
+                );
+            }
+        }
+    }
+}
+
+        }
+
+        // --- 5. 障礙物 (鳥) ---
+        class Bird {
+            constructor() {
+                this.width = 60;
+                this.height = 40;
+                this.x = canvas.width;
+                this.y = Math.random() * (GROUND_Y - 400) + 250;
+                this.speed = gameSpeed + Math.random() * 300 + 120;
+                // 載入子彈圖片
+                this.image = new Image();
+                this.image.src = 'bullet.png';
+            }
+            update(deltaTime) {
+                this.x -= this.speed * deltaTime;
+            }
+            draw() {
+                // 使用圖片替代原本的矩形
+                if (this.image.complete) {
+                    ctx.drawImage(this.image, this.x, this.y, this.width, this.height);
+                } else {
+                    // 如果圖片還沒載入完成，使用預設的黃色矩形
+                    ctx.fillStyle = '#ffcc00';
+                    ctx.fillRect(this.x, this.y, this.width, this.height);
+                }
+            }
+        }
+
+        // --- 6. 背景 ---
+        class Star {
+            constructor() {
+                this.x = Math.random() * canvas.width;
+                this.y = Math.random() * (GROUND_Y - 50);
+                this.size = Math.random() * 2 + 1;
+                this.speedModifier = Math.random() * 0.5 + 0.1;
+            }
+            update(deltaTime) {
+                this.x -= gameSpeed * this.speedModifier * deltaTime;
+                if (this.x < 0) {
+                    this.x = canvas.width;
+                }
+            }
+            draw() {
+                ctx.fillStyle = 'white';
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+        }
+
+        // 新增雲朵類別
+        class Cloud {
+            constructor() {
+                this.width = Math.random() * 150 + 180;
+                this.height = Math.random() * 60 + 60;
+                this.x = canvas.width + Math.random() * 1000;
+                this.y = Math.random() * (GROUND_Y - 400) + 100;
+                this.speed = gameSpeed * 0.2;
+                this.pixels = [];
+                this.generatePixelCloud();
+            }
+
+            generatePixelCloud() {
+                const centerX = this.width / 2;
+                const centerY = this.height / 2;
+                const pixelSize = 8;
+
+                for (let x = 0; x < this.width; x += pixelSize) {
+                    for (let y = 0; y < this.height; y += pixelSize) {
+                        const distance = Math.sqrt(
+                            Math.pow((x - centerX) / (this.width * 0.35), 2) +
+                            Math.pow((y - centerY) / (this.height * 0.35), 2)
+                        );
+                        
+                        if (distance < 1 && Math.random() > distance * 0.85) {
+                            this.pixels.push({
+                                x: x,
+                                y: y,
+                                size: pixelSize
+                            });
+                        }
+                    }
+                }
+            }
+
+            update(deltaTime) {
+                this.x -= this.speed * deltaTime;
+                if (this.x + this.width < 0) {
+                    this.x = canvas.width + Math.random() * 500;
+                    this.y = Math.random() * (GROUND_Y - 400) + 100;
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                this.pixels.forEach(pixel => {
+                    ctx.fillRect(
+                        this.x + pixel.x,
+                        this.y + pixel.y,
+                        pixel.size,
+                        pixel.size
+                    );
+                });
+            }
+        }
+
+        // 新增雨滴類別
+        class RainDrop {
+            constructor() {
+                this.x = Math.random() * canvas.width;
+                this.y = -10;
+                this.speed = Math.random() * 300 + 700;
+                this.length = Math.random() * 5 + 5;
+                this.width = 12;                          // 增加雨滴寬度到12像素
+            }
+
+            update(deltaTime) {
+                this.y += this.speed * deltaTime;
+                if (this.y > canvas.height) {
+                    this.y = -10;
+                    this.x = Math.random() * canvas.width;
+                }
+            }
+
+            draw() {
+                ctx.strokeStyle = 'rgba(100, 100, 255, 0.8)';
+                ctx.lineWidth = this.width;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(this.x, this.y + this.length);
+                ctx.stroke();
+            }
+        }
+
+        // 新增雪花類別
+        class SnowFlake {
+            constructor() {
+                this.x = Math.random() * canvas.width;
+                this.y = -10;
+                this.speed = Math.random() * 100 + 50;
+                this.size = 5;                               // 固定大小
+                this.swing = Math.random() * 2 - 1;
+                this.swingSpeed = Math.random() * 2 + 1;
+                this.swingOffset = Math.random() * Math.PI * 2;
+            }
+
+            update(deltaTime) {
+                this.y += this.speed * deltaTime;
+                this.x += Math.sin(this.swingOffset) * this.swing * deltaTime;
+                this.swingOffset += this.swingSpeed * deltaTime;
+
+                if (this.y > canvas.height) {
+                    this.y = -10;
+                    this.x = Math.random() * canvas.width;
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';  // 更不透明的白色
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // 新增太陽類別
+        class Sun {
+            constructor() {
+                this.x = canvas.width * 0.8;
+                this.y = 150;
+                this.radius = 60;
+                this.rays = 12;
+            }
+
+            draw() {
+                // 繪製太陽本體
+                ctx.fillStyle = '#FFD700';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 繪製太陽光芒
+                ctx.strokeStyle = '#FFD700';
+                ctx.lineWidth = 3;
+                for (let i = 0; i < this.rays; i++) {
+                    const angle = (i / this.rays) * Math.PI * 2;
+                    const rayLength = this.radius * 0.5;
+                    ctx.beginPath();
+                    ctx.moveTo(
+                        this.x + Math.cos(angle) * this.radius,
+                        this.y + Math.sin(angle) * this.radius
+                    );
+                    ctx.lineTo(
+                        this.x + Math.cos(angle) * (this.radius + rayLength),
+                        this.y + Math.sin(angle) * (this.radius + rayLength)
+                    );
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // --- 7. 遊戲主邏輯 ---
+        let player, platforms, birds, stars, clouds, rainDrops, snowFlakes, sun;
+
+        function init() {
+            player = new Player();
+            platforms = [];
+            birds = [];
+            stars = [];
+            clouds = [];
+            rainDrops = [];
+            snowFlakes = [];
+            sun = new Sun();
+            score = 0;
+            gameFrame = 0;
+            isGameOver = false;
+            isPaused = false;
+
+            gameSpeed = 800;
+            nextSpeedUpScore = 50;
+            
+            // 重置跳躍狀態
+            isHoldingJump = false;
+            jumpPressStart = null;
+            mediumJumpTimeout = null;
+            mediumJumpTriggered = false;
+            lastRepeatJumpTime = 0;
+
+            // 重置環境數值
+            humidity = 50;  // 固定濕度為 50%
+            temperature = 20; // 固定溫度為 20°C
+            nextWeatherChange = 150;
+            nextDayNightChange = 100;
+
+            // 播放背景音樂
+            bgm.currentTime = 0;
+            bgm.play().catch(() => {
+                console.log('音樂播放被阻止，等待用戶互動');
+            });
+
+            let currentX = 0;
+            while (currentX < canvas.width + 200) {
+                const width = Math.random() * 1000 + 600;
+                platforms.push(new Platform(currentX, width));
+                const gap = 0;
+                currentX += width + gap;
+            }
+
+            // 初始化星星
+            for (let i = 0; i < 100; i++) {
+                stars.push(new Star());
+            }
+
+            // 初始化雲朵（初始濕度50%時顯示）
+            for (let i = 0; i < 3; i++) {
+                const cloud = new Cloud();
+                cloud.x = canvas.width + i * 800;
+                clouds.push(cloud);
+            }
+
+            // 初始化雨滴和雪花（增加數量）
+            for (let i = 0; i < 200; i++) {  // 增加數量到200
+                rainDrops.push(new RainDrop());
+                snowFlakes.push(new SnowFlake());
+            }
+        }
+
+        function handlePlatforms(deltaTime) {
+            platforms.forEach(p => { p.update(deltaTime); p.draw(); });
+            
+            platforms = platforms.filter(p => p.x + p.width > -p.width);
+
+            const lastPlatform = platforms[platforms.length - 1];
+            if (lastPlatform.x + lastPlatform.width < canvas.width) {
+                const width = Math.random() * 1000 + 600;  // 增加平台寬度
+                let gap = 0;
+                if (gameFrame > SAFE_START_FRAMES) {
+                    gap = Math.random() * 400 + 200;  // 增加平台間距
+                }
+                platforms.push(new Platform(lastPlatform.x + lastPlatform.width + gap, width));
+            }
+        }
+
+        function handleBirds(deltaTime) {
+            if (gameFrame > SAFE_START_FRAMES && gameFrame % 120 === 0 && Math.random() > 0.4) {  // 降低鳥的出現頻率
+                birds.push(new Bird());
+            }
+
+            birds.forEach(b => {
+                b.update(deltaTime);
+                b.draw();
+                if (player.x < b.x + b.width && player.x + player.width > b.x &&
+                    player.y < b.y + b.height && player.y + player.height > b.y) {
+                    gameOver();
+                }
+            });
+            birds = birds.filter(b => b.x + b.width > 0);
+        }
+
+        function handleBackground(deltaTime) {
+            const isDay = targetBgColor === DAY_COLOR || targetBgColor === COLD_DAY_COLOR;
+            
+            // 判斷溫度區間
+            const isLowTemp = temperature >= -10 && temperature <= 5;
+            const isMidTemp = temperature >= 6 && temperature <= 30;
+            const isHighTemp = temperature >= 31 && temperature <= 50;
+            
+            // 判斷濕度區間
+            const isLowHumidity = humidity >= 0 && humidity <= 49;
+            const isMidHumidity = humidity >= 50 && humidity <= 80;
+            const isHighHumidity = humidity >= 81 && humidity <= 100;
+            
+            if (isDay) {
+                // 雲朵顯示（中濕度或高濕度時）
+                if (isMidHumidity || isHighHumidity) {
+                    clouds.forEach(c => {
+                        c.update(deltaTime);
+                        c.draw();
+                    });
+                }
+
+                // 雨雪效果
+                if (isHighHumidity) {
+                    if (isLowTemp) {
+                        // 下雪（高濕度且低溫）
+                        snowFlakes.forEach(s => {
+                            s.update(deltaTime);
+                            s.draw();
+                        });
+                    } else {
+                        // 下雨（高濕度且中溫或高溫）
+                        rainDrops.forEach(r => {
+                            r.update(deltaTime);
+                            r.draw();
+                        });
+                    }
+                }
+
+                // 太陽顯示
+                if (isMidTemp || isHighTemp) {
+                    // 中溫或高溫時顯示太陽
+                    sun.draw();
+                    // 高溫時顯示雙太陽
+                    if (isHighTemp) {
+                        // 創建一個新的 Sun 實例，並設定不同的位置
+                        const secondSun = new Sun();
+                        secondSun.x = canvas.width * 0.2; // 調整 X 座標
+                        secondSun.y = 200; // 調整 Y 座標
+                        secondSun.draw(); // 繪製第二個太陽
+                    }
+                }
+            } else {
+                // 晚上顯示星星
+                stars.forEach(s => {
+                    s.update(deltaTime);
+                    s.draw();
+                });
+                
+                // 晚上也可能有雲和雨雪
+                if (isMidHumidity || isHighHumidity) {
+                    clouds.forEach(c => {
+                        c.update(deltaTime);
+                        c.draw();
+                    });
+                }
+                
+                if (isHighHumidity) {
+                    if (isLowTemp) {
+                        snowFlakes.forEach(s => {
+                            s.update(deltaTime);
+                            s.draw();
+                        });
+                    } else {
+                        rainDrops.forEach(r => {
+                            r.update(deltaTime);
+                            r.draw();
+                        });
+                    }
+                }
+            }
+        }
+
+        function gameOver() { 
+            isGameOver = true;
+            bgm.pause();  // 遊戲結束時停止音樂
+        }
+
+        function drawUI() {
+            ctx.fillStyle = 'white';
+            ctx.font = '40px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(`分數: ${Math.floor(score)}`, 30, 50);
+            
+            // 顯示環境數值
+            ctx.font = '30px Arial';
+            ctx.fillText(`濕度: ${humidity}%`, 30, 100);
+            ctx.fillText(`溫度: ${temperature}°C`, 30, 150);
+
+            if (isGameOver) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = 'white';
+                ctx.font = '80px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 50);
+                ctx.font = '40px Arial';
+                ctx.fillText(`你的分數: ${Math.floor(score)}`, canvas.width / 2, canvas.height / 2 + 50);
+                ctx.fillText('按 Enter 鍵重新開始', canvas.width / 2, canvas.height / 2 + 120);
+            }
+
+            // 新增暫停時的畫面顯示
+            if (isPaused) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = 'white';
+                ctx.font = '80px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('暫停', canvas.width / 2, canvas.height / 2 - 50);
+                ctx.font = '40px Arial';
+                ctx.fillText('按 ESC 鍵繼續', canvas.width / 2, canvas.height / 2 + 50);
+            }
+        }
+
+        function drawBackground() {
+            // 更新顏色漸變進度
+            if (currentBgColor !== targetBgColor) {
+                colorTransitionProgress += COLOR_TRANSITION_SPEED;
+                if (colorTransitionProgress >= 1) {
+                    colorTransitionProgress = 1;
+                    currentBgColor = targetBgColor;
+                }
+            }
+
+            // 創建漸層背景
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            
+            // 根據當前顏色過渡進度計算漸層顏色
+            const r1 = parseInt(currentBgColor.slice(1, 3), 16);
+            const g1 = parseInt(currentBgColor.slice(3, 5), 16);
+            const b1 = parseInt(currentBgColor.slice(5, 7), 16);
+            
+            const r2 = parseInt(targetBgColor.slice(1, 3), 16);
+            const g2 = parseInt(targetBgColor.slice(3, 5), 16);
+            const b2 = parseInt(targetBgColor.slice(5, 7), 16);
+            
+            const r = Math.round(r1 + (r2 - r1) * colorTransitionProgress);
+            const g = Math.round(g1 + (g2 - g1) * colorTransitionProgress);
+            const b = Math.round(b1 + (b2 - b1) * colorTransitionProgress);
+            
+            // 設置漸層顏色
+            if (targetBgColor === DAY_COLOR) {
+                if (temperature >= -10 && temperature <= 5) {
+                    // 冷天顏色
+                    gradient.addColorStop(0, COLD_DAY_COLOR);
+                    gradient.addColorStop(1, `rgb(${Math.max(0, parseInt(COLD_DAY_COLOR.slice(1, 3), 16) - 30)}, ${Math.max(0, parseInt(COLD_DAY_COLOR.slice(3, 5), 16) - 30)}, ${Math.max(0, parseInt(COLD_DAY_COLOR.slice(5, 7), 16) - 30)})`);
+                } else {
+                    // 正常白天顏色
+                    gradient.addColorStop(0, `rgb(${r}, ${g}, ${b})`);
+                    gradient.addColorStop(1, `rgb(${Math.max(0, r - 50)}, ${Math.max(0, g - 50)}, ${Math.max(0, b - 50)})`);
+                }
+            } else {
+                // 夜晚顏色
+                gradient.addColorStop(0, `rgb(${r}, ${g}, ${b})`);
+                gradient.addColorStop(1, `rgb(${Math.max(0, r - 30)}, ${Math.max(0, g - 30)}, ${Math.max(0, b - 30)})`);
+            }
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // --- 8. 遊戲主循環 (Game Loop) ---
+        function animate(timestamp) {
+            deltaTime = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+            if (deltaTime > 1 / 30) deltaTime = 1 / 30;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 檢查是否需要切換日夜
+            const dayNightThreshold = Math.floor(score / 100) * 100;
+            if (dayNightThreshold % 200 === 0) {
+                targetBgColor = DAY_COLOR;
+            } else if (dayNightThreshold % 200 === 100) {
+                targetBgColor = NIGHT_COLOR;
+            }
+
+            // 檢查是否需要改變天氣
+            // const weatherThreshold = Math.floor(score / 150) * 150;
+            // if (weatherThreshold > 0 && weatherThreshold === nextWeatherChange) {
+            //     // 隨機改變濕度
+            //     const humidityOptions = [0, 50, 100];
+            //     humidity = humidityOptions[Math.floor(Math.random() * humidityOptions.length)];
+                
+            //     // 隨機改變溫度
+            //     const temperatureOptions = [0, 20, 35];
+            //     temperature = temperatureOptions[Math.floor(Math.random() * temperatureOptions.length)];
+                
+            //     // 更新下次天氣改變的分數
+            //     nextWeatherChange += 150;
+            // }
+
+            // 根據溫度和日夜狀態更新背景顏色
+            let newTargetColor;
+            if (targetBgColor === DAY_COLOR) {
+                if (temperature === 0) {
+                    newTargetColor = COLD_DAY_COLOR;
+                } else {
+                    newTargetColor = DAY_COLOR;
+                }
+            } else {
+                newTargetColor = targetBgColor;
+            }
+
+            // 如果目標顏色改變，重置漸變進度
+            if (newTargetColor !== targetBgColor) {
+                targetBgColor = newTargetColor;
+                colorTransitionProgress = 0;
+            }
+
+            // 更新背景顏色漸變
+            if (currentBgColor !== targetBgColor) {
+                colorTransitionProgress += COLOR_TRANSITION_SPEED;
+                if (colorTransitionProgress >= 1) {
+                    colorTransitionProgress = 1;
+                    currentBgColor = targetBgColor;
+                }
+            }
+
+            drawBackground();
+            handleBackground(deltaTime);
+            handlePlatforms(deltaTime);
+
+            if (!isGameOver && !isPaused) {
+                // 【修改】處理長按連續跳躍的邏輯
+                if (isHoldingJump && jumpPressStart !== null) {
+                    const holdTime = performance.now() - jumpPressStart;
+                    // 檢查是否超過連續跳躍的總時間門檻，且距離上次跳躍已超過間隔時間
+                    if (holdTime > JUMP_REPEAT_TIME && performance.now() - lastRepeatJumpTime >= JUMP_REPEAT_TIME) {
+                        player.jump(JUMP_VELOCITY_B);
+                        lastRepeatJumpTime = performance.now();
+                    }
+                }
+
+                player.update(platforms, deltaTime);
+                handleBirds(deltaTime);
+
+                score += gameSpeed * deltaTime / 100;
+                gameFrame++;
+
+                if (score >= nextSpeedUpScore) {
+                    gameSpeed += 30;
+                    nextSpeedUpScore += 50;
+                    console.log(`Speed increased to: ${gameSpeed}`);
+                }
+            }
+
+            player.draw();
+            birds.forEach(b => b.draw());
+
+            drawUI();
+
+            // 顯示天氣訊息
+            if (weatherMessageTimer > 0) {
+                ctx.fillStyle = 'white';
+                ctx.font = '36px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(weatherMessage, canvas.width / 2, 100);
+                weatherMessageTimer--;
+            }
+
+            if (!isGameOver) {
+                requestAnimationFrame(animate);
+            }
+        }
+
+        // --- 9. 事件監聽 ---
+        // 【修改】keydown 事件監聽器
+        window.addEventListener('keydown', (e) => {
+            if (isGameOver) {
+                if (e.code === 'Enter') {
+                    init();
+                    lastTime = performance.now();
+                    requestAnimationFrame(animate);
+                    // 在用戶互動後播放音樂
+                    bgm.play().catch(() => {
+                        console.log('音樂播放被阻止，等待用戶互動');
+                    });
+                }
+                return;
+            }
+
+            // 如果是第一次按鍵，嘗試播放音樂
+            if (!bgm.played.length) {
+                bgm.play().catch(() => {
+                    console.log('音樂播放被阻止，等待用戶互動');
+                });
+            }
+
+            // 處理暫停功能
+            if (e.code === 'Escape') {
+                isPaused = !isPaused;
+                if (isPaused) {
+                    bgm.pause();  // 暫停時停止音樂
+                } else {
+                    bgm.play();   // 繼續時播放音樂
+                }
+                return;
+            }
+
+            // 如果遊戲暫停，不處理其他按鍵
+            if (isPaused) return;
+
+            // 防止鍵盤重複觸發
+            if (keyPressed[e.code]) return;
+            keyPressed[e.code] = true;
+
+            switch (e.code) {
+                case 'Space':
+                    if (!isHoldingJump) {
+                        isHoldingJump = true;
+                        jumpPressStart = performance.now();
+                        mediumJumpTriggered = false; // 重置觸發標記
+
+                        // 設定一個計時器，在125ms時觸發中等跳躍
+                        mediumJumpTimeout = setTimeout(() => {
+                            // 125ms後，如果按鍵還按著，就觸發大跳
+                            if (isHoldingJump) {
+                                player.jump(JUMP_VELOCITY_B);
+                                mediumJumpTriggered = true; // 標記已觸發
+                                // 同時更新長按計時，讓第一次長按跳躍在 250ms 後發生
+                                lastRepeatJumpTime = performance.now(); 
+                            }
+                        }, JUMP_PRESS_THRESHOLD);
+                    }
+                    break;
+                case 'ShiftLeft':
+                case 'ShiftRight':
+                    player.crouch();
+                    break;
+            }
+        });
+
+        // 【修改】keyup 事件監聽器
+        window.addEventListener('keyup', (e) => {
+            keyPressed[e.code] = false;
+
+            if (e.code === 'Space') {
+                isHoldingJump = false; // 標記按鍵已放開
+
+                // 立即清除中等跳躍的計時器
+                // 如果在125ms內放開，這會阻止大跳發生
+                if (mediumJumpTimeout) {
+                    clearTimeout(mediumJumpTimeout);
+                    mediumJumpTimeout = null;
+                }
+
+                // 只有當中等跳躍 "沒有" 被觸發時，才執行短按的小跳
+                if (!mediumJumpTriggered) {
+                    player.jump(JUMP_VELOCITY_A);
+                }
+
+                // 重置狀態以備下次跳躍
+                jumpPressStart = null;
+                mediumJumpTriggered = false;
+            }
+
+            if (!isGameOver && (e.code === 'ShiftLeft' || e.code === 'ShiftRight')) {
+                player.standUp();
+            }
+        });
+
+        // --- 10. 啟動遊戲 ---
+        init();
+        lastTime = performance.now();
+        requestAnimationFrame(animate);
+    </script>
+    <script>
+        // 連線 MQTT
+        const mqttClient = mqtt.connect('wss://mqtt-edu.webduino.io/mqtt', {
+            username: 'hsh2025',
+            password: 'hsh2025',
+            clientId: 'game-' + Math.random().toString(36).substring(2, 10),
+            reconnectPeriod: 2000
+        });
+        
+        mqttClient.on('connect', () => {
+            console.log('[MQTT] 遊戲端已連線');
+            mqttClient.subscribe('youle/weather/update', err => {
+                if (err) {
+                    console.error('[MQTT] 訂閱失敗:', err);
+                } else {
+                    console.log('[MQTT] 已訂閱 youle/weather/update');
+                }
+            });
+        });
+        
+        mqttClient.on('message', (topic, payload) => {
+            try {
+                const data = JSON.parse(payload.toString());
+                if (typeof data.temperature === 'number') {
+                    temperature = data.temperature;
+                    // 更新天氣訊息
+                    updateWeatherStatus(`溫度: ${temperature}°C, 濕度: ${humidity}%`);
+                }
+                if (typeof data.humidity === 'number') {
+                    humidity = data.humidity;
+                }
+                console.log('[MQTT] 接收到資料：', data);
+            } catch (err) {
+                console.error('[MQTT] 格式錯誤:', err);
+            }
+        });
+    </script>
+        
+
+</body>
+</html>
